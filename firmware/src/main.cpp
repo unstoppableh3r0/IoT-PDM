@@ -15,17 +15,17 @@
 #include <DallasTemperature.h>
 
 // ----- WiFi -----
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* WIFI_SSID     = "money trees";
+const char* WIFI_PASSWORD = "kendricklamar";
 
 // ----- MQTT -----
-const char* MQTT_BROKER   = "broker.hivemq.com";
+const char* MQTT_BROKER   = "broker.mqttdashboard.com";
 const uint16_t MQTT_PORT   = 1883;
 const char* MQTT_TOPIC    = "iot/pdm/project/data";
 const char* MQTT_CLIENT_ID = "esp32_pdm_001";
 
 // ----- DS18B20 (Temperature) -----
-const int ONE_WIRE_BUS = 4;  // GPIO4 for DS18B20 data
+const int ONE_WIRE_BUS = 14;  // GPIO4 for DS18B20 data
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature tempSensor(&oneWire);
 
@@ -55,15 +55,21 @@ void setupWifi() {
     Serial.print(".");
   }
   Serial.println();
-  Serial.print("IP: ");
+  Serial.println("=========================================");
+  Serial.print("SUCCESS: WiFi Connected to SSID: ");
+  Serial.println(WIFI_SSID);
+  Serial.print("Local IP Address: ");
   Serial.println(WiFi.localIP());
+  Serial.println("=========================================");
 }
 
 void reconnectMqtt() {
   while (!mqttClient.connected()) {
-    Serial.print("MQTT connecting...");
+    Serial.print("Attempting MQTT connection to ");
+    Serial.print(MQTT_BROKER);
+    Serial.print("...");
     if (mqttClient.connect(MQTT_CLIENT_ID)) {
-      Serial.println(" connected");
+      Serial.println(" SUCCESS: MQTT connected!");
     } else {
       Serial.print(" failed, rc=");
       Serial.println(mqttClient.state());
@@ -97,20 +103,28 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
+  Serial.println("\n--- Starting Smart IoT PDM Node ---");
+
   if (!mpu.begin()) {
-    Serial.println("MPU6050 not found. Check wiring.");
+    Serial.println("ERROR: MPU6050 not found. Check wiring (SDA/SCL).");
     while (1) delay(10);
   }
+  Serial.println("SUCCESS: MPU6050 init successful!");
   mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
   mpu.setGyroRange(MPU6050_RANGE_500_DEG);
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 
   tempSensor.begin();
+  Serial.println("SUCCESS: DS18B20 Temp Sensor init successful!");
+  
   pinMode(ACS712_PIN, INPUT);
 
   setupWifi();
+  
+  Serial.println("Configuring MQTT Broker...");
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
   mqttClient.setBufferSize(256);
+  Serial.println("Setup Complete. Entering Main Loop.\n");
 }
 
 void loop() {

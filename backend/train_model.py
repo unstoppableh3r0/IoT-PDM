@@ -16,8 +16,8 @@ DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "ai4i2020.csv"
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "pdm_model.pkl")
 
 # AI4I 2020 columns: Air temperature [K], Torque [Nm], Rotational speed [rpm]
-# We map to our sensors: temp (from Air temp), amp (from Torque), vib (from Rotational speed)
-FEATURE_COLUMNS = ["Air temperature [K]", "Torque [Nm]", "Rotational speed [rpm]"]
+# We map to our sensors: temp (from Air temp), vib (from Rotational speed)
+FEATURE_COLUMNS = ["Air temperature [K]", "Rotational speed [rpm]"]
 TARGET_COLUMN = "Machine failure"
 
 
@@ -54,7 +54,7 @@ def train_and_save():
 
 
 def get_feature_order():
-    """Order of features for inference: [temp, amp, vib] mapped to [Air temp, Torque, Rotational speed]."""
+    """Order of features for inference: [temp, vib] mapped to [Air temp, Rotational speed]."""
     return FEATURE_COLUMNS
 
 

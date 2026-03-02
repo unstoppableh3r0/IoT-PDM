@@ -19,15 +19,15 @@ from train_model import FEATURE_COLUMNS
 from explain_agent import get_explanation
 
 # ----- Config -----
-MQTT_BROKER = "broker.hivemq.com"
-MQTT_PORT = 1883
+MQTT_BROKER = "broker.mqttdashboard.com"
+MQTT_PORT = 8000  # Port 8000 for WebSockets
 TOPIC_DATA = "iot/pdm/project/data"
 TOPIC_RESULT = "iot/pdm/project/result"
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "pdm_model.pkl")
 
 # CRITICAL DEMO: Toggle with 'f' + Enter
 FORCE_FAULT = False
-FAKE_FAULTY_DATA = {"vib": 45.0, "temp": 85.0, "amp": 5.5}
+FAKE_FAULTY_DATA = {"vib": 45.0, "temp": 85.0}
 
 # ----- Model (global for predict) -----
 _model = None
@@ -43,16 +43,14 @@ def load_model():
 
 
 def predict(sensor_data: dict) -> str:
-    """Map sensor keys to feature order [Air temp, Torque, Rotational speed] -> temp, amp, vib."""
-    # Our sensors: vib, temp, amp -> map to Air temperature (temp), Torque (amp), Rotational speed (vib)
+    """Map sensor keys to feature order [Air temp, Rotational speed] -> temp, vib."""
+    # Our sensors: vib, temp -> map to Air temperature (temp), Rotational speed (vib)
     # AI4I uses K for temp; we use °C. Approximate: Air temp K ≈ temp_C + 273
     temp_c = float(sensor_data.get("temp", 0))
-    amp = float(sensor_data.get("amp", 0))
     vib = float(sensor_data.get("vib", 0))
     air_temp_k = temp_c + 273.15
-    torque = amp * 10  # scale current to Nm range (~40 Nm in dataset)
     rot_speed = min(max(vib * 100, 0), 3000)  # scale vibration to rpm-like
-    X = pd.DataFrame([[air_temp_k, torque, rot_speed]], columns=FEATURE_COLUMNS)
+    X = pd.DataFrame([[air_temp_k, rot_speed]], columns=FEATURE_COLUMNS)
     pred = _model.predict(X)[0]
     return "Faulty" if pred == 1 else "Healthy"
 
@@ -83,7 +81,6 @@ def on_message(client, userdata, msg):
         "timestamp": timestamp,
         "vib": data.get("vib"),
         "temp": data.get("temp"),
-        "amp": data.get("amp"),
     }
     payload = json.dumps(result)
     client.publish(TOPIC_RESULT, payload, qos=0)
@@ -107,7 +104,8 @@ def keyboard_listener():
 
 def main():
     load_model()
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, transport="websockets")
+    client.ws_set_options(path="/mqtt")
     client.on_connect = on_connect
     client.on_message = on_message
     client.connect(MQTT_BROKER, MQTT_PORT, 60)

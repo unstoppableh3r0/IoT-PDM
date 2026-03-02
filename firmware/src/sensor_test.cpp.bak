@@ -1,0 +1,112 @@
+/**
+ * SENSOR TEST SCRIPT
+ * 
+ * Target: ESP32
+ * Sensors: 
+ *   - MPU6050 (I2C: SDA=21, SCL=22)
+ *   - DS18B20 (OneWire: GPIO 15)
+ * 
+ * INSTRUCTIONS:
+ * 1. To run this script, you must disable your existing main.cpp.
+ *    Rename `src/main.cpp` to `src/main.cpp.bak`.
+ * 2. Rename this file to `src/main.cpp` OR ensure it's the only file with setup()/loop().
+ */
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// ----- CONFIGURATION -----
+const int BAUD_RATE = 115200;
+
+// ----- DS18B20 (Temperature) -----
+const int TEST_ONE_WIRE_BUS = 15; // GPIO 15 as requested
+OneWire oneWire(TEST_ONE_WIRE_BUS);
+DallasTemperature tempSensor(&oneWire);
+
+// ----- MPU6050 (dAcceleration/Gyro) -----
+Adafruit_MPU6050 mpu;
+
+void setup() {
+  Serial.begin(BAUD_RATE);
+  while (!Serial) delay(10); // Wait for serial console to open
+
+  Serial.println("\n\n=== SENSOR TEST STARTING ===");
+
+  // 1. Initialize DS18B20
+  Serial.print("Initializing DS18B20 on GPIO ");
+  Serial.print(TEST_ONE_WIRE_BUS);
+  Serial.println("...");
+  tempSensor.begin();
+
+  if (tempSensor.getDS18Count() > 0) {
+    Serial.print("  -> SUCCESS: Found ");
+    Serial.print(tempSensor.getDS18Count());
+    Serial.println(" device(s).");
+  } else {
+    Serial.println("  -> WARNING: No DS18B20 sensors found! Check wiring (Pull-up resistor?).");
+  }
+
+  // 2. Initialize MPU6050
+  Serial.println("Initializing MPU6050...");
+  if (!mpu.begin()) {
+    Serial.println("  -> FAILED: Could not find a valid MPU6050 chip");
+    Serial.println("     Check wiring (SDA=21, SCL=22 for ESP32 En).");
+    while (1) {
+      delay(10);
+    }
+  }
+  Serial.println("  -> SUCCESS: MPU6050 Found!");
+
+  // Setup MPU settings
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+  Serial.println("=== SETUP COMPLETE ===");
+  Serial.println("Reading sensors every 2 seconds...");
+  delay(1000);
+}
+
+void loop() {
+  // Read Temperature
+  tempSensor.requestTemperatures(); 
+  float tempC = tempSensor.getTempCByIndex(0);
+
+  // Read Motion
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+
+  // Print Results
+  Serial.println("\n-------------------------");
+  
+  // DS18B20 Output
+  Serial.print("Temp (DS18B20): ");
+  if(tempC == DEVICE_DISCONNECTED_C) {
+    Serial.println("Error: Disconnected");
+  } else {
+    Serial.print(tempC);
+    Serial.println(" °C");
+  }
+
+  // MPU6050 Output
+  Serial.print("Accel (m/s^2): X: "); Serial.print(a.acceleration.x);
+  Serial.print(", Y: "); Serial.print(a.acceleration.y);
+  Serial.print(", Z: "); Serial.print(a.acceleration.z);
+  Serial.println("");
+
+  Serial.print("Gyro (rad/s):  X: "); Serial.print(g.gyro.x);
+  Serial.print(", Y: "); Serial.print(g.gyro.y);
+  Serial.print(", Z: "); Serial.print(g.gyro.z);
+  Serial.println("");
+  
+  // MPU internal temp (for comparison)
+  Serial.print("Temp (MPU Internal): ");
+  Serial.print(temp.temperature);
+  Serial.println(" °C");
+
+  delay(2000);
+}

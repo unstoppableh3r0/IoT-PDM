@@ -34,7 +34,7 @@ const PLACEHOLDER_RESULT = {
   explanation: 'Sensors within normal range. No action required.',
   timestamp: new Date().toISOString(),
 }
-const PLACEHOLDER_LAST_DATA = { vib: 9.0, temp: 42.5, amp: 1.8 }
+const PLACEHOLDER_LAST_DATA = { vib: 9.0, temp: 42.5 }
 
 function App() {
   const [connected, setConnected] = useState(false)
@@ -56,8 +56,9 @@ function App() {
     let client = null
     import('mqtt/dist/mqtt.min')
       .then((mod) => {
-        const mqtt = mod.default
-        client = mqtt.connect('ws://broker.hivemq.com:8000/mqtt', {
+        const mqtt = mod.default || mod
+        // Fallback to mqttdashboard standard websocket broker endpoint
+        client = mqtt.connect('ws://broker.mqttdashboard.com:8000/mqtt', {
           reconnectPeriod: 3000,
           connectTimeout: 5000,
         })
@@ -122,9 +123,8 @@ function App() {
             </span>
           )}
           <span
-            className={`px-3 py-1 rounded-full text-sm font-medium ${
-              connected ? 'bg-emerald-500/80 text-emerald-950' : 'bg-red-500/80 text-red-950'
-            }`}
+            className={`px-3 py-1 rounded-full text-sm font-medium ${connected ? 'bg-emerald-500/80 text-emerald-950' : 'bg-red-500/80 text-red-950'
+              }`}
           >
             {connected ? 'MQTT Connected' : 'Disconnected'}
           </span>
@@ -133,9 +133,8 @@ function App() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
         <div
-          className={`rounded-2xl p-8 text-center ${
-            isFaulty ? 'bg-red-500/20 border-2 border-red-500' : 'bg-emerald-500/20 border-2 border-emerald-500'
-          }`}
+          className={`rounded-2xl p-8 text-center ${isFaulty ? 'bg-red-500/20 border-2 border-red-500' : 'bg-emerald-500/20 border-2 border-emerald-500'
+            }`}
         >
           <p className="text-sm font-medium text-slate-400 uppercase tracking-wider mb-2">
             Motor Status
@@ -186,7 +185,6 @@ function App() {
         <div className="flex flex-wrap gap-4 text-slate-300">
           <span>Vib: <strong>{lastData?.vib ?? '—'}</strong></span>
           <span>Temp: <strong>{lastData?.temp ?? '—'} °C</strong></span>
-          <span>Amp: <strong>{lastData?.amp ?? '—'} A</strong></span>
         </div>
       </div>
     </div>
