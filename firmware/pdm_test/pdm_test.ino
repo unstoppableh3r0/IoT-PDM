@@ -1,33 +1,49 @@
 /**
- * PDM Test Sketch - Arduino IDE
- * Publishes DUMMY sensor data to MQTT (no physical sensors needed).
- * Use this to test: WiFi -> MQTT -> Backend -> Frontend
- * 
- * 1. Set WIFI_SSID and WIFI_PASSWORD below
- * 2. Board: ESP32 Dev Module
- * 3. Install libraries: PubSubClient, ArduinoJson
- * 4. Upload and open Serial Monitor (115200)
+ * Smart IoT Predictive Maintenance - ESP32 Firmware
+ * Sensors: MPU6050 (Vibration), DS18B20 (Temperature), ACS712 (Current)
+ * Publishes JSON to MQTT: iot/pdm/project/data
  */
 
+#include <Arduino.h>
+#include <Wire.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
-// ----- SET THESE -----
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+// ----- WiFi -----
+const char* WIFI_SSID     = "Iron Man";
+const char* WIFI_PASSWORD = "gbpp3000";
 
 // ----- MQTT -----
-const char* MQTT_BROKER   = "broker.hivemq.com";
-const uint16_t MQTT_PORT  = 1883;
+const char* MQTT_BROKER   = "broker.mqttdashboard.com";
+const uint16_t MQTT_PORT   = 1883;
 const char* MQTT_TOPIC    = "iot/pdm/project/data";
-const char* MQTT_CLIENT_ID = "esp32_pdm_test";
+const char* MQTT_CLIENT_ID = "esp32_pdm_001";
 
+// ----- DS18B20 (Temperature) -----
+const int ONE_WIRE_BUS = 14;  // GPIO4 for DS18B20 data
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature tempSensor(&oneWire);
+
+// ----- ACS712 (Current) - analog pin -----
+const int ACS712_PIN = 34;   // GPIO34 (ADC1_6)
+const float ACS712_SENSITIVITY = 0.066;  // 66 mV/A for ACS712-5A
+const float ZERO_CURRENT_VOLTAGE = 2.5; // Vcc/2 at 0A
+const float ADC_VREF = 3.3;
+const int ADC_RESOLUTION = 4095;
+
+// ----- Objects -----
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
+Adafruit_MPU6050 mpu;
 
-unsigned long lastPublish = 0;
-const unsigned long INTERVAL_MS = 1000;
+// ----- Timing -----
+const unsigned long SAMPLE_INTERVAL_MS = 1000;
+unsigned long lastPublishTime = 0;
 
 void setupWifi() {
   Serial.print("Connecting to ");
@@ -38,14 +54,22 @@ void setupWifi() {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nWiFi connected. IP: " + WiFi.localIP().toString());
+  Serial.println();
+  Serial.println("=========================================");
+  Serial.print("SUCCESS: WiFi Connected to SSID: ");
+  Serial.println(WIFI_SSID);
+  Serial.print("Local IP Address: ");
+  Serial.println(WiFi.localIP());
+  Serial.println("=========================================");
 }
 
 void reconnectMqtt() {
   while (!mqttClient.connected()) {
-    Serial.print("MQTT connecting...");
+    Serial.print("Attempting MQTT connection to ");
+    Serial.print(MQTT_BROKER);
+    Serial.print("...");
     if (mqttClient.connect(MQTT_CLIENT_ID)) {
-      Serial.println(" connected");
+      Serial.println(" SUCCESS: MQTT connected!");
     } else {
       Serial.print(" failed, rc=");
       Serial.println(mqttClient.state());
@@ -54,14 +78,53 @@ void reconnectMqtt() {
   }
 }
 
+float readVibrationMagnitude() {
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+  float x = a.acceleration.x;
+  float y = a.acceleration.y;
+  float z = a.acceleration.z;
+  return sqrt(x * x + y * y + z * z);
+}
+
+float readTemperature() {
+  tempSensor.requestTemperatures();
+  return tempSensor.getTempCByIndex(0);
+}
+
+float readCurrent() {
+  int raw = analogRead(ACS712_PIN);
+  float voltage = (raw / (float)ADC_RESOLUTION) * ADC_VREF;
+  float current = (voltage - ZERO_CURRENT_VOLTAGE) / ACS712_SENSITIVITY;
+  return fabs(current);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("PDM Test - Dummy data mode");
+
+  Serial.println("\n--- Starting Smart IoT PDM Node ---");
+
+  if (!mpu.begin()) {
+    Serial.println("ERROR: MPU6050 not found. Check wiring (SDA/SCL).");
+    while (1) delay(10);
+  }
+  Serial.println("SUCCESS: MPU6050 init successful!");
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+  tempSensor.begin();
+  Serial.println("SUCCESS: DS18B20 Temp Sensor init successful!");
+  
+  pinMode(ACS712_PIN, INPUT);
 
   setupWifi();
+  
+  Serial.println("Configuring MQTT Broker...");
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
   mqttClient.setBufferSize(256);
+  Serial.println("Setup Complete. Entering Main Loop.\n");
 }
 
 void loop() {
@@ -71,13 +134,14 @@ void loop() {
   mqttClient.loop();
 
   unsigned long now = millis();
-  if (now - lastPublish >= INTERVAL_MS) {
-    lastPublish = now;
+  if (now - lastPublishTime >= SAMPLE_INTERVAL_MS) {
+    lastPublishTime = now;
 
-    // Dummy sensor values (simulated)
-    float vib = 8.0 + (random(0, 50) / 10.0);   // 8.0 - 12.9
-    float temp = 40.0 + (random(0, 30) / 10.0); // 40.0 - 42.9
-    float amp = 1.5 + (random(0, 20) / 10.0);   // 1.5 - 3.4
+    float vib = readVibrationMagnitude();
+    float temp = readTemperature();
+    float amp = readCurrent();
+
+    if (isnan(temp)) temp = 0.0f;
 
     StaticJsonDocument<128> doc;
     doc["vib"] = round(vib * 10.0f) / 10.0f;
@@ -85,10 +149,10 @@ void loop() {
     doc["amp"] = round(amp * 10.0f) / 10.0f;
 
     char payload[128];
-    serializeJson(doc, payload);
+    size_t len = serializeJson(doc, payload);
 
     if (mqttClient.publish(MQTT_TOPIC, payload, false)) {
-      Serial.printf("Published: %s\n", payload);
+      Serial.printf("Published: vib=%.1f temp=%.1f amp=%.1f\n", vib, temp, amp);
     } else {
       Serial.println("Publish failed");
     }
