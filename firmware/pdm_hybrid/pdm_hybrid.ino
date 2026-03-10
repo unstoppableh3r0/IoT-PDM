@@ -5,9 +5,20 @@
  * 
  * LoRa Configuration (Verified Working):
  *   SCK=5, MISO=19, MOSI=27, CS=18, RST=14, DIO0=26
+ * 
+ * ARDUINO IDE SETUP:
+ *   Board: "ESP32 Dev Module"
+ *   Upload Speed: 115200
+ *   Required Libraries:
+ *     - Adafruit MPU6050
+ *     - Adafruit Unified Sensor
+ *     - DallasTemperature
+ *     - OneWire
+ *     - PubSubClient
+ *     - ArduinoJson
+ *     - LoRa by Sandeep Mistry
  */
 
-#include <Arduino.h>
 #include <Wire.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
