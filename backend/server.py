@@ -28,10 +28,9 @@ from mqtt_config import (
     TOPIC_DATA, TOPIC_RESULT, TOPIC_EXPLAIN_REQ, TOPIC_EXPLAIN_RES,
     TOPIC_RETRAIN_REQ, TOPIC_RETRAIN_RES, TOPIC_FEEDBACK
 )
-from http_server import run_http_server
+from tb_client import start_tb_client
 
 # ----- Config -----
-HTTP_PORT = 5000  # Port for receiving LoRa data from gateway
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "pdm_model.pkl")
 HISTORY_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "sensor_history.csv")
 
@@ -793,9 +792,8 @@ def main():
     load_model()
     
     # Initialize MQTT client for publishing results only
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, transport="websockets")
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, transport="tcp")
     _mqtt_client = client  # Store globally for process_lora_data()
-    client.ws_set_options(path="/mqtt")
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
     client.on_subscribe = on_subscribe
@@ -803,14 +801,9 @@ def main():
     _log(f"Connecting to {MQTT_BROKER}:{MQTT_PORT} ...")
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
     
-    # Start HTTP server for local LoRa gateway data (non-blocking)
-    _log(f"Starting HTTP server on port {HTTP_PORT} for local LoRa data...")
-    http_thread = threading.Thread(
-        target=run_http_server,
-        args=(process_lora_data, HTTP_PORT),
-        daemon=True
-    )
-    http_thread.start()
+    # Start ThingsBoard API polling client
+    _log(f"Starting ThingsBoard telemetry polling client...")
+    tb_thread = start_tb_client(callback=process_lora_data, poll_interval=2.0)
     
     # Start admin console in background daemon thread
     admin_thread = threading.Thread(target=admin_console, daemon=True)
@@ -822,9 +815,9 @@ def main():
     
     _log("="*60)
     _log("IoT-PDM Backend Ready:")
-    _log(f"  - HTTP Server: http://0.0.0.0:{HTTP_PORT}/api/lora/data (local gateway)")
-    _log(f"  - MQTT Broker: {MQTT_BROKER}:{MQTT_PORT} (cloud results)")
-    _log(f"  - Architecture: Gateway → HTTP(local) → ML → MQTT(results)")
+    _log(f"  - ThingsBoard Polling: Active (fetching latest telemetry)")
+    _log(f"  - MQTT Broker: {MQTT_BROKER}:{MQTT_PORT} (publishing cloud results)")
+    _log(f"  - Architecture: ESP32(LoRa) → GW → ThingsBoard → ML → MQTT(results)")
     _log("="*60)
     
     client.loop_forever()

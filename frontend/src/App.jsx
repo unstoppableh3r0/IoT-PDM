@@ -19,6 +19,7 @@ const TOPIC_EXPLAIN_RES = TOPICS.EXPLAIN_RES
 const TOPIC_RETRAIN_REQ = TOPICS.RETRAIN_REQ
 const TOPIC_RETRAIN_RES = TOPICS.RETRAIN_RES
 const TOPIC_FEEDBACK = TOPICS.FEEDBACK
+const TOPIC_CONTROL = TOPICS.CONTROL
 const MAX_POINTS = 30
 const MAX_HISTORY = 50
 const DEMO_VIB_THRESHOLD = 40
@@ -81,6 +82,7 @@ function App() {
   // Hybrid LoRa/MQTT Communication Tracking
   const [commStats, setCommStats] = useState(null)  // Communication statistics
   const [loraActive, setLoraActive] = useState(false)  // Whether LoRa is actively receiving
+  const [hasSeenFault, setHasSeenFault] = useState(false)  // Track if any fault was seen in session
   const explainRequestTypeRef = useRef(null)  // Track which explanation was requested: 'prediction' or 'threshold'
   const clientRef = useRef(null)
 
@@ -118,7 +120,7 @@ function App() {
       // 3. Calculate trends from recent window
       const last5 = prev.slice(-5)
       const prev5 = prev.slice(Math.max(0, prev.length - 10), Math.max(0, prev.length - 5))
-      
+
       if (last5.length > 0 && prev5.length > 0) {
         const recentVibAvg = last5.reduce((a, b) => a + b.vib, 0) / last5.length
         const prevVibAvg = prev5.reduce((a, b) => a + b.vib, 0) / prev5.length
@@ -146,7 +148,7 @@ function App() {
         const avgTemp = prev.slice(-5).reduce((a, b) => a + b.temp, 0) / Math.min(5, prev.length)
         const vibDeviation = Math.abs(currentVib - avgVib)
         const tempDeviation = Math.abs(currentTemp - avgTemp)
-        
+
         if (vibDeviation > 3 || tempDeviation > 5) {
           const anomaly = {
             type: vibDeviation > 3 ? 'Vibration Spike' : 'Temperature Spike',
@@ -159,6 +161,8 @@ function App() {
 
       // 6. Generate maintenance recommendation based on health score
       const faultRatio = prev.filter(r => r.isFaulted).length / prev.length
+      if (faultRatio > 0.1) setHasSeenFault(true) // Persistent trigger
+
       let recommendation = null
       if (newHealthScore < 30 || faultRatio > 0.5) {
         recommendation = { severity: 'CRITICAL', message: 'Immediate maintenance required — motor failure imminent', color: 'red' }
@@ -233,29 +237,58 @@ function App() {
               setLastData(msg)
               setLastDataTime(new Date())
               const t = new Date().toLocaleTimeString()
+
+              const vibVal = Number(msg.vib)
+              const tempVal = Number(msg.temp)
+
               setSensorHistory((prev) => {
-                const next = [...prev, {
-                  time: t,
-                  vib: Number(msg.vib) ?? 0,
-                  temp: Number(msg.temp) ?? 0,
-                }]
-                return next.slice(-MAX_POINTS)
+                const entry = { time: t }
+                // Only add valid numbers, skip error codes like -1
+                if (!isNaN(vibVal) && vibVal >= 0) entry.vib = vibVal
+                if (!isNaN(tempVal) && tempVal > 0) entry.temp = tempVal
+
+                if (entry.vib !== undefined || entry.temp !== undefined) {
+                  return [...prev, entry].slice(-MAX_POINTS)
+                }
+                return prev
               })
             } else if (topic === TOPIC_RESULT) {
               setLastResultTime(new Date())
-              if (msg.vib != null || msg.temp != null) {
+
+              // Extract values for graph plotting
+              const vibValue = msg.vib !== undefined ? Number(msg.vib) : null
+              const tempValue = msg.temp !== undefined ? Number(msg.temp) : null
+
+              if (vibValue !== null || tempValue !== null) {
+                // Update Last Data display
                 setLastData((prev) => ({
                   ...prev,
-                  ...(msg.vib != null && { vib: msg.vib }),
-                  ...(msg.temp != null && { temp: msg.temp }),
+                  ...(vibValue !== null && !isNaN(vibValue) && { vib: vibValue }),
+                  ...(tempValue !== null && !isNaN(tempValue) && { temp: tempValue }),
                 }))
-                
-                // Check if thresholds are exceeded on RESULT data (which contains injected faults)
-                const vib = Number(msg.vib) ?? 0
-                const temp = Number(msg.temp) ?? 0
+
+                // Update live graph history
+                const t = msg.timestamp
+                  ? new Date(msg.timestamp).toLocaleTimeString()
+                  : new Date().toLocaleTimeString()
+
+                setSensorHistory((prev) => {
+                  const entry = { time: t }
+                  // Filter out NaN and error values (-1)
+                  if (vibValue !== null && !isNaN(vibValue) && vibValue >= 0) entry.vib = vibValue
+                  if (tempValue !== null && !isNaN(tempValue) && tempValue > 0) entry.temp = tempValue
+
+                  if (entry.vib !== undefined || entry.temp !== undefined) {
+                    return [...prev, entry].slice(-MAX_POINTS)
+                  }
+                  return prev
+                })
+
+                // Fault Detection
+                const vib = !isNaN(vibValue) ? vibValue : 0
+                const temp = !isNaN(tempValue) ? tempValue : 0
                 const isFaultedReading = vib > VIB_DANGER || temp > TEMP_DANGER
-                
-                // Add to sliding window for fault stability
+
                 setRecentReadings((prev) => {
                   const updated = [...prev, {
                     timestamp: msg.timestamp || new Date().toISOString(),
@@ -263,11 +296,9 @@ function App() {
                     temp: temp,
                     isFaulted: isFaultedReading
                   }].slice(-FAULT_WINDOW_SIZE)
-                  
-                  // Count faults in current window
+
                   const faultCount = updated.filter(r => r.isFaulted).length
-                  
-                  // Show fault panel only if we reach threshold
+
                   if (faultCount >= FAULT_THRESHOLD_COUNT) {
                     setThresholdFault({
                       timestamp: msg.timestamp || new Date().toISOString(),
@@ -277,30 +308,23 @@ function App() {
                       faultCount: faultCount,
                       windowSize: updated.length
                     })
-                    setFaultExplanation(null)  // Clear old explanation
+                    setFaultExplanation(null)
                   } else if (faultCount < FAULT_THRESHOLD_COUNT - 2) {
-                    // Clear fault panel if faults drop below near-threshold level
                     setThresholdFault(null)
                   }
-                  
                   return updated
                 })
-                
-                // Update predictive maintenance metrics from backend calculation
-                if (msg.health_score != null) {
-                  setHealthScore(msg.health_score)
-                }
-                if (msg.baseline != null) {
-                  setBaselineData(msg.baseline)
-                }
+
+                // Metrics
+                if (msg.health_score != null) setHealthScore(msg.health_score)
+                if (msg.baseline != null) setBaselineData(msg.baseline)
                 if (msg.trend != null) {
                   const trend = msg.trend
                   setVibrationTrend(trend.vib_trend === 'rising' ? 1 : trend.vib_trend === 'falling' ? -1 : 0)
                   setTemperatureTrend(trend.temp_trend === 'rising' ? 1 : trend.temp_trend === 'falling' ? -1 : 0)
                 }
-                if (msg.rul_days != null) {
-                  setEstimatedRUL(msg.rul_days)
-                }
+                if (msg.rul_days != null) setEstimatedRUL(msg.rul_days)
+
                 if (msg.anomalies != null && (msg.anomalies.vib_anomaly || msg.anomalies.temp_anomaly)) {
                   const alerts = []
                   if (msg.anomalies.vib_anomaly) {
@@ -321,22 +345,21 @@ function App() {
                     setAnomalyAlerts((prev) => [...alerts, ...prev].slice(0, 10))
                   }
                 }
-                
-                // Update hybrid communication statistics
+
+                // Comm Stats
                 if (msg.comm_stats) {
                   setCommStats(msg.comm_stats)
-                  // Check if LoRa is actively being used
                   setLoraActive(msg.comm_stats.last_source === 'lora' || msg.comm_stats.lora_messages > 0)
                 }
-                
-                // Calculate predictive maintenance metrics (fallback if not from backend)
+
                 calculatePredictiveMetrics({ vib, temp })
               }
-              // Track prediction history
+
+              // Prediction History
               setPredictionHistory((prev) => [{
                 time: new Date().toLocaleTimeString(),
-                timestamp: msg.timestamp, // ISO timestamp for feedback
-                prediction: msg.prediction,
+                timestamp: msg.timestamp,
+                prediction: msg.prediction || 'Unknown',
                 vib: msg.vib,
                 temp: msg.temp,
                 health_score: msg.health_score,
@@ -344,18 +367,17 @@ function App() {
                 feedbackSent: false,
                 correctedLabel: null,
               }, ...prev].slice(0, MAX_HISTORY))
-              // Update stats
+
               setStats((prev) => ({
                 ...prev,
                 total: prev.total + 1,
                 healthy: prev.healthy + (msg.prediction === 'Healthy' ? 1 : 0),
                 faulty: prev.faulty + (msg.prediction === 'Faulty' ? 1 : 0),
               }))
-              // Only clear explanation if prediction changed
+
               setResult((prev) => {
-                if (prev?.prediction !== msg.prediction) {
-                  setExplanation(null)
-                }
+                if (prev?.prediction !== msg.prediction) setExplanation(null)
+                if (msg.prediction === 'Faulty') setHasSeenFault(true)
                 return msg
               })
             } else if (topic === TOPIC_EXPLAIN_RES) {
@@ -516,11 +538,10 @@ function App() {
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
         {/* Motor Status - large */}
         <div
-          className={`col-span-2 lg:col-span-1 rounded-2xl p-6 text-center transition-colors duration-500 ${
-            isFaulty
-              ? 'bg-red-500/20 border-2 border-red-500'
-              : 'bg-emerald-500/20 border-2 border-emerald-500'
-          }`}
+          className={`col-span-2 lg:col-span-1 rounded-2xl p-6 text-center transition-colors duration-500 ${isFaulty
+            ? 'bg-red-500/20 border-2 border-red-500'
+            : 'bg-emerald-500/20 border-2 border-emerald-500'
+            }`}
         >
           <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-1">Motor Status</p>
           <p className={`text-3xl font-bold ${isFaulty ? 'text-red-400' : 'text-emerald-400'}`}>
@@ -534,10 +555,9 @@ function App() {
         {/* Vibration */}
         <div className="rounded-2xl bg-slate-800/50 border border-slate-700 p-4 text-center">
           <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-1">Vibration</p>
-          <p className={`text-2xl font-bold ${
-            (lastData?.vib ?? 0) >= VIB_DANGER ? 'text-red-400' :
+          <p className={`text-2xl font-bold ${(lastData?.vib ?? 0) >= VIB_DANGER ? 'text-red-400' :
             (lastData?.vib ?? 0) >= VIB_WARN ? 'text-amber-400' : 'text-sky-400'
-          }`}>
+            }`}>
             {lastData?.vib ?? '—'}
           </p>
           <p className="text-xs text-slate-500">unit</p>
@@ -546,10 +566,9 @@ function App() {
         {/* Temperature */}
         <div className="rounded-2xl bg-slate-800/50 border border-slate-700 p-4 text-center">
           <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-1">Temperature</p>
-          <p className={`text-2xl font-bold ${
-            (lastData?.temp ?? 0) >= TEMP_DANGER ? 'text-red-400' :
+          <p className={`text-2xl font-bold ${(lastData?.temp ?? 0) >= TEMP_DANGER ? 'text-red-400' :
             (lastData?.temp ?? 0) >= TEMP_WARN ? 'text-amber-400' : 'text-orange-400'
-          }`}>
+            }`}>
             {lastData?.temp ?? '—'} <span className="text-base font-normal">°C</span>
           </p>
           <p className="text-xs text-slate-500">ambient</p>
@@ -558,10 +577,9 @@ function App() {
         {/* Fault Rate */}
         <div className="rounded-2xl bg-slate-800/50 border border-slate-700 p-4 text-center">
           <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-1">Fault Rate</p>
-          <p className={`text-2xl font-bold ${
-            Number(faultRate) > 20 ? 'text-red-400' :
+          <p className={`text-2xl font-bold ${Number(faultRate) > 20 ? 'text-red-400' :
             Number(faultRate) > 5 ? 'text-amber-400' : 'text-emerald-400'
-          }`}>
+            }`}>
             {faultRate}<span className="text-base font-normal">%</span>
           </p>
           <p className="text-xs text-slate-500">{stats.faulty}/{stats.total} readings</p>
@@ -574,6 +592,8 @@ function App() {
           <p className="text-xs text-slate-500">monitoring</p>
         </div>
       </div>
+
+      {/* Demo controls removed as per user request — now terminal only */}
 
       {/* Hybrid Communication Statistics */}
       {commStats && (
@@ -602,26 +622,24 @@ function App() {
             </div>
             <div className="text-center">
               <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">Signal (RSSI)</p>
-              <p className={`text-2xl font-bold ${
-                commStats.lora_rssi_avg > -80 ? 'text-green-400' :
+              <p className={`text-2xl font-bold ${commStats.lora_rssi_avg > -80 ? 'text-green-400' :
                 commStats.lora_rssi_avg > -100 ? 'text-amber-400' : 'text-red-400'
-              }`}>
+                }`}>
                 {commStats.lora_rssi_avg ? `${commStats.lora_rssi_avg} dBm` : '—'}
               </p>
             </div>
             <div className="text-center">
               <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">Quality (SNR)</p>
-              <p className={`text-2xl font-bold ${
-                commStats.lora_snr_avg > 5 ? 'text-green-400' :
+              <p className={`text-2xl font-bold ${commStats.lora_snr_avg > 5 ? 'text-green-400' :
                 commStats.lora_snr_avg > 0 ? 'text-amber-400' : 'text-red-400'
-              }`}>
+                }`}>
                 {commStats.lora_snr_avg ? `${commStats.lora_snr_avg} dB` : '—'}
               </p>
             </div>
           </div>
           {commStats.node_id && (
             <div className="mt-4 pt-4 border-t border-slate-700 text-sm text-slate-400">
-              <span className="font-medium">Current Source:</span> {commStats.last_source === 'lora' ? '📡 LoRa' : '📶 WiFi/MQTT'} 
+              <span className="font-medium">Current Source:</span> {commStats.last_source === 'lora' ? '📡 LoRa' : '📶 WiFi/MQTT'}
               {commStats.node_id && <span className="ml-3">| <span className="font-medium">Node:</span> {commStats.node_id}</span>}
               {commStats.gateway && <span className="ml-3">| <span className="font-medium">Gateway:</span> {commStats.gateway}</span>}
             </div>
@@ -629,47 +647,41 @@ function App() {
         </div>
       )}
 
-      {/* Predictive Maintenance Dashboard */}
+      {/* Main Grid: Health Score & RUL + Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-        {/* Health Score - Large */}
-        <div className={`lg:col-span-1 rounded-2xl p-6 border-2 ${
-          healthScore >= 70 ? 'bg-emerald-500/10 border-emerald-500' :
+        <div className={`lg:col-span-1 rounded-2xl p-6 border-2 ${healthScore >= 70 ? 'bg-emerald-500/10 border-emerald-500' :
           healthScore >= 50 ? 'bg-amber-500/10 border-amber-500' :
-          'bg-red-500/10 border-red-500'
-        }`}>
+            'bg-red-500/10 border-red-500'
+          }`}>
           <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">Health Score</p>
           <div className="text-center">
-            <p className={`text-5xl font-bold ${
-              healthScore >= 70 ? 'text-emerald-400' :
+            <p className={`text-5xl font-bold ${healthScore >= 70 ? 'text-emerald-400' :
               healthScore >= 50 ? 'text-amber-400' :
-              'text-red-400'
-            }`}>{healthScore}</p>
+                'text-red-400'
+              }`}>{healthScore}</p>
             <p className="text-slate-400 text-sm mt-2">/100</p>
             <div className="w-full bg-slate-700 rounded-full h-2 mt-4">
-              <div 
-                className={`h-2 rounded-full transition-all ${
-                  healthScore >= 70 ? 'bg-emerald-500' :
+              <div
+                className={`h-2 rounded-full transition-all ${healthScore >= 70 ? 'bg-emerald-500' :
                   healthScore >= 50 ? 'bg-amber-500' :
-                  'bg-red-500'
-                }`}
+                    'bg-red-500'
+                  }`}
                 style={{ width: `${healthScore}%` }}
               />
             </div>
           </div>
         </div>
 
-        {/* Trends */}
         <div className="rounded-2xl bg-slate-800/50 border border-slate-700 p-6">
           <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-4">Trends</p>
           <div className="space-y-4">
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-slate-400 text-sm">Vibration</span>
-                <span className={`font-bold ${
-                  vibrationTrend > 0 ? 'text-red-400' :
+                <span className={`font-bold ${vibrationTrend > 0 ? 'text-red-400' :
                   vibrationTrend < 0 ? 'text-emerald-400' :
-                  'text-slate-300'
-                }`}>
+                    'text-slate-300'
+                  }`}>
                   {vibrationTrend > 0 ? '📈 Rising' : vibrationTrend < 0 ? '📉 Declining' : '➡️ Stable'}
                 </span>
               </div>
@@ -677,11 +689,10 @@ function App() {
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-slate-400 text-sm">Temperature</span>
-                <span className={`font-bold ${
-                  temperatureTrend > 0 ? 'text-red-400' :
+                <span className={`font-bold ${temperatureTrend > 0 ? 'text-red-400' :
                   temperatureTrend < 0 ? 'text-emerald-400' :
-                  'text-slate-300'
-                }`}>
+                    'text-slate-300'
+                  }`}>
                   {temperatureTrend > 0 ? '📈 Rising' : temperatureTrend < 0 ? '📉 Declining' : '➡️ Stable'}
                 </span>
               </div>
@@ -689,131 +700,37 @@ function App() {
           </div>
         </div>
 
-        {/* RUL - Remaining Useful Life */}
-        <div className={`rounded-2xl p-6 border-2 ${
-          estimatedRUL && estimatedRUL < 4 ? 'bg-red-500/10 border-red-500' :
+        <div className={`rounded-2xl p-6 border-2 ${estimatedRUL && estimatedRUL < 4 ? 'bg-red-500/10 border-red-500' :
           estimatedRUL && estimatedRUL < 8 ? 'bg-amber-500/10 border-amber-500' :
-          'bg-slate-800/50 border-slate-700'
-        }`}>
-          <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">Estimated RUL</p>
-          <p className={`text-3xl font-bold mb-1 ${
-            estimatedRUL && estimatedRUL < 4 ? 'text-red-400' :
-            estimatedRUL && estimatedRUL < 8 ? 'text-amber-400' :
-            'text-sky-400'
+            'bg-slate-800/50 border-slate-700'
           }`}>
+          <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">Estimated RUL</p>
+          <p className={`text-3xl font-bold mb-1 ${estimatedRUL && estimatedRUL < 4 ? 'text-red-400' :
+            estimatedRUL && estimatedRUL < 8 ? 'text-amber-400' :
+              'text-sky-400'
+            }`}>
             {estimatedRUL ?? '—'}
           </p>
           <p className="text-xs text-slate-400">hours remaining</p>
         </div>
       </div>
 
-      {/* Maintenance Recommendation */}
       {maintenanceRecommendation && (
-        <div className={`rounded-2xl p-6 mb-6 border-l-4 ${
-          maintenanceRecommendation.color === 'red' ? 'bg-red-500/10 border-red-500' :
+        <div className={`rounded-2xl p-6 mb-6 border-l-4 ${maintenanceRecommendation.color === 'red' ? 'bg-red-500/10 border-red-500' :
           maintenanceRecommendation.color === 'amber' ? 'bg-amber-500/10 border-amber-500' :
-          maintenanceRecommendation.color === 'yellow' ? 'bg-yellow-500/10 border-yellow-500' :
-          'bg-emerald-500/10 border-emerald-500'
-        }`}>
+            maintenanceRecommendation.color === 'yellow' ? 'bg-yellow-500/10 border-yellow-500' :
+              'bg-emerald-500/10 border-emerald-500'
+          }`}>
           <div className="flex items-start gap-3">
             <span className="text-2xl mt-1">🔧</span>
             <div className="flex-1">
-              <p className={`font-bold mb-1 ${
-                maintenanceRecommendation.color === 'red' ? 'text-red-400' :
+              <p className={`font-bold mb-1 ${maintenanceRecommendation.color === 'red' ? 'text-red-400' :
                 maintenanceRecommendation.color === 'amber' ? 'text-amber-400' :
-                maintenanceRecommendation.color === 'yellow' ? 'text-yellow-400' :
-                'text-emerald-400'
-              }`}>
+                  maintenanceRecommendation.color === 'yellow' ? 'text-yellow-400' :
+                    'text-emerald-400'
+                }`}>
                 {maintenanceRecommendation.severity}: {maintenanceRecommendation.message}
               </p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Anomaly Alerts */}
-      {anomalyAlerts.length > 0 && (
-        <div className="rounded-2xl bg-orange-500/10 border border-orange-500 p-6 mb-6">
-          <p className="text-xs font-medium text-orange-400 uppercase tracking-wider mb-3">⚡ Recent Anomalies</p>
-          <div className="space-y-2">
-            {anomalyAlerts.map((alert, i) => (
-              <div key={i} className="flex justify-between items-center text-sm">
-                <span className="text-slate-300">{alert.type}</span>
-                <span className="text-orange-400 font-mono text-xs">{alert.value} @ {alert.timestamp}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Historical Baseline Comparison */}
-      {baselineData && (
-        <div className="rounded-2xl bg-slate-800/50 border border-slate-700 p-6 mb-6">
-          <p className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-4">📊 Historical Baseline vs. Current</p>
-          <div className="grid grid-cols-2 gap-6">
-            {/* Vibration Comparison */}
-            <div className="space-y-3">
-              <div>
-                <p className="text-xs text-slate-500 mb-1">Vibration (m/s²)</p>
-                <div className="flex items-baseline gap-4">
-                  <div>
-                    <p className="text-slate-400 text-xs">Baseline</p>
-                    <p className="text-xl font-bold text-emerald-400">{baselineData.vib?.toFixed(1) ?? '—'}</p>
-                  </div>
-                  <div>
-                    <p className="text-slate-400 text-xs">Current</p>
-                    <p className={`text-xl font-bold ${
-                      (lastData?.vib ?? 0) > VIB_DANGER ? 'text-red-400' :
-                      (lastData?.vib ?? 0) > VIB_WARN ? 'text-amber-400' :
-                      'text-sky-400'
-                    }`}>{lastData?.vib?.toFixed(1) ?? '—'}</p>
-                  </div>
-                </div>
-                <p className="text-xs text-slate-500 mt-2">
-                  {lastData && baselineData.vib ? (
-                    <span>
-                      {lastData.vib > baselineData.vib ? '↑' : '↓'} 
-                      {Math.abs((lastData.vib - baselineData.vib) / baselineData.vib * 100).toFixed(0)}% change
-                    </span>
-                  ) : '—'}
-                </p>
-              </div>
-            </div>
-            
-            {/* Temperature Comparison */}
-            <div className="space-y-3">
-              <div>
-                <p className="text-xs text-slate-500 mb-1">Temperature (°C)</p>
-                <div className="flex items-baseline gap-4">
-                  <div>
-                    <p className="text-slate-400 text-xs">Baseline</p>
-                    <p className="text-xl font-bold text-emerald-400">{baselineData.temp?.toFixed(1) ?? '—'}</p>
-                  </div>
-                  <div>
-                    <p className="text-slate-400 text-xs">Current</p>
-                    <p className={`text-xl font-bold ${
-                      (lastData?.temp ?? 0) > TEMP_DANGER ? 'text-red-400' :
-                      (lastData?.temp ?? 0) > TEMP_WARN ? 'text-amber-400' :
-                      'text-orange-400'
-                    }`}>{lastData?.temp?.toFixed(1) ?? '—'}</p>
-                  </div>
-                </div>
-                <p className="text-xs text-slate-500 mt-2">
-                  {lastData && baselineData.temp ? (
-                    <span>
-                      {lastData.temp > baselineData.temp ? '↑' : '↓'} 
-                      {Math.abs((lastData.temp - baselineData.temp) / baselineData.temp * 100).toFixed(0)}% change
-                    </span>
-                  ) : '—'}
-                </p>
-              </div>
-            </div>
-
-            {/* Rotation Speed Baseline */}
-            <div className="col-span-2">
-              <p className="text-xs text-slate-500 mb-2">Rotation Speed Reference (RPM)</p>
-              <p className="text-lg font-bold text-slate-300">{baselineData.rot_speed_mean?.toFixed(0) ?? '—'}</p>
-              <p className="text-xs text-slate-500 mt-1">Typical healthy operating speed</p>
             </div>
           </div>
         </div>
@@ -837,9 +754,11 @@ function App() {
               </button>
             </div>
           </div>
-        ) : isFaulty ? (
+        ) : (isFaulty || hasSeenFault) ? (
           <div className="flex items-center gap-4">
-            <span className="text-amber-400 text-sm">Fault detected —</span>
+            <span className="text-amber-400 text-sm">
+              {isFaulty ? 'Active fault detected —' : 'Historical fault detected —'}
+            </span>
             <button
               onClick={handleAskAI}
               disabled={explainLoading || !connected}
@@ -848,8 +767,8 @@ function App() {
               {explainLoading ? (
                 <span className="flex items-center gap-2">
                   <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"/>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                   </svg>
                   Asking AI...
                 </span>
@@ -861,7 +780,6 @@ function App() {
         )}
       </div>
 
-      {/* Threshold-Based Fault Detection Panel */}
       {thresholdFault && (
         <div className="rounded-2xl bg-red-500/10 border-2 border-red-500 p-6 mb-6">
           <div className="flex items-start justify-between mb-4">
@@ -885,7 +803,7 @@ function App() {
               </div>
             </div>
           </div>
-          
+
           {faultExplanation ? (
             <div className="flex items-start gap-3 mt-4">
               <span className="text-2xl">🤖</span>
@@ -908,8 +826,8 @@ function App() {
               {faultExplainLoading ? (
                 <>
                   <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"/>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                   </svg>
                   Analyzing Fault...
                 </>
@@ -921,7 +839,6 @@ function App() {
 
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        {/* Vibration Chart */}
         <div className="rounded-2xl bg-slate-800/50 border border-slate-700 p-6">
           <h2 className="text-lg font-semibold text-slate-200 mb-4">Live Vibration</h2>
           <div className="h-64">
@@ -940,7 +857,6 @@ function App() {
           </div>
         </div>
 
-        {/* Temperature Chart */}
         <div className="rounded-2xl bg-slate-800/50 border border-slate-700 p-6">
           <h2 className="text-lg font-semibold text-slate-200 mb-4">Live Temperature</h2>
           <div className="h-64">
@@ -960,79 +876,74 @@ function App() {
         </div>
       </div>
 
-      {/* Prediction History + Model Training Row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-        {/* Prediction History - wider */}
         <div className="lg:col-span-2 rounded-2xl bg-slate-800/50 border border-slate-700 p-6">
           <h2 className="text-lg font-semibold text-slate-200 mb-3">Prediction History</h2>
           <p className="text-xs text-slate-500 mb-3">
             Label readings to improve the model — click the check or X to confirm or correct each prediction.
           </p>
-        {predictionHistory.length === 0 ? (
-          <p className="text-slate-500 text-sm">No predictions yet — waiting for backend results...</p>
-        ) : (
-          <div className="max-h-48 overflow-y-auto">
-            <table className="w-full text-sm">
-              <thead className="text-slate-400 text-xs uppercase sticky top-0 bg-slate-800">
-                <tr>
-                  <th className="text-left py-2 px-3">Time</th>
-                  <th className="text-left py-2 px-3">Status</th>
-                  <th className="text-right py-2 px-3">Vibration</th>
-                  <th className="text-right py-2 px-3">Temp (°C)</th>
-                  <th className="text-center py-2 px-3">Feedback</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-700/50">
-                {predictionHistory.map((entry, i) => (
-                  <tr key={i} className="hover:bg-slate-700/30">
-                    <td className="py-1.5 px-3 text-slate-400 font-mono text-xs">{entry.time}</td>
-                    <td className="py-1.5 px-3">
-                      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${
-                        entry.prediction === 'Faulty'
+          {predictionHistory.length === 0 ? (
+            <p className="text-slate-500 text-sm">No predictions yet — waiting for backend results...</p>
+          ) : (
+            <div className="max-h-48 overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="text-slate-400 text-xs uppercase sticky top-0 bg-slate-800">
+                  <tr>
+                    <th className="text-left py-2 px-3">Time</th>
+                    <th className="text-left py-2 px-3">Status</th>
+                    <th className="text-right py-2 px-3">Vibration</th>
+                    <th className="text-right py-2 px-3">Temp (°C)</th>
+                    <th className="text-center py-2 px-3">Feedback</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-700/50">
+                  {predictionHistory.map((entry, i) => (
+                    <tr key={i} className="hover:bg-slate-700/30">
+                      <td className="py-1.5 px-3 text-slate-400 font-mono text-xs">{entry.time}</td>
+                      <td className="py-1.5 px-3">
+                        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${entry.prediction === 'Faulty'
                           ? 'bg-red-500/20 text-red-400'
                           : 'bg-emerald-500/20 text-emerald-400'
-                      }`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${
-                          entry.prediction === 'Faulty' ? 'bg-red-400' : 'bg-emerald-400'
-                        }`}/>
-                        {entry.prediction}
-                      </span>
-                    </td>
-                    <td className="py-1.5 px-3 text-right text-slate-300">{entry.vib ?? '—'}</td>
-                    <td className="py-1.5 px-3 text-right text-slate-300">{entry.temp ?? '—'}</td>
-                    <td className="py-1.5 px-3 text-center">
-                      {entry.feedbackSent ? (
-                        <span className="text-xs text-violet-400">
-                          {entry.correctedLabel === 1 ? 'Faulty' : 'Healthy'}
+                          }`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${entry.prediction === 'Faulty' ? 'bg-red-400' : 'bg-emerald-400'
+                            }`} />
+                          {entry.prediction}
                         </span>
-                      ) : (
-                        <div className="flex items-center justify-center gap-1">
-                          <button
-                            onClick={() => handleFeedback(entry, entry.prediction === 'Faulty' ? 1 : 0)}
-                            title="Confirm prediction is correct"
-                            className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/40 text-xs"
-                          >
-                            ✓
-                          </button>
-                          <button
-                            onClick={() => handleFeedback(entry, entry.prediction === 'Faulty' ? 0 : 1)}
-                            title="Prediction was wrong — flip label"
-                            className="px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/40 text-xs"
-                          >
-                            ✗
-                          </button>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+                      </td>
+                      <td className="py-1.5 px-3 text-right text-slate-300">{entry.vib ?? '—'}</td>
+                      <td className="py-1.5 px-3 text-right text-slate-300">{entry.temp ?? '—'}</td>
+                      <td className="py-1.5 px-3 text-center">
+                        {entry.feedbackSent ? (
+                          <span className="text-xs text-violet-400">
+                            {entry.correctedLabel === 1 ? 'Faulty' : 'Healthy'}
+                          </span>
+                        ) : (
+                          <div className="flex items-center justify-center gap-1">
+                            <button
+                              onClick={() => handleFeedback(entry, entry.prediction === 'Faulty' ? 1 : 0)}
+                              title="Confirm prediction is correct"
+                              className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/40 text-xs"
+                            >
+                              ✓
+                            </button>
+                            <button
+                              onClick={() => handleFeedback(entry, entry.prediction === 'Faulty' ? 0 : 1)}
+                              title="Prediction was wrong — flip label"
+                              className="px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/40 text-xs"
+                            >
+                              ✗
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
-        {/* Model Training Panel */}
         <div className="rounded-2xl bg-slate-800/50 border border-slate-700 p-6">
           <h2 className="text-lg font-semibold text-slate-200 mb-3">Model Training</h2>
           <p className="text-xs text-slate-500 mb-4">
@@ -1047,8 +958,8 @@ function App() {
             {retrainLoading ? (
               <span className="flex items-center justify-center gap-2">
                 <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                 </svg>
                 Retraining...
               </span>
@@ -1056,11 +967,10 @@ function App() {
           </button>
 
           {retrainResult && (
-            <div className={`rounded-lg p-4 text-sm ${
-              retrainResult.status === 'success'
-                ? 'bg-emerald-500/10 border border-emerald-500/30'
-                : 'bg-red-500/10 border border-red-500/30'
-            }`}>
+            <div className={`rounded-lg p-4 text-sm ${retrainResult.status === 'success'
+              ? 'bg-emerald-500/10 border border-emerald-500/30'
+              : 'bg-red-500/10 border border-red-500/30'
+              }`}>
               {retrainResult.status === 'success' ? (
                 <>
                   <p className="text-emerald-400 font-medium mb-2">Model retrained successfully!</p>
@@ -1076,20 +986,9 @@ function App() {
               )}
             </div>
           )}
-
-          <div className="mt-4 p-3 rounded-lg bg-slate-700/30 text-xs text-slate-400">
-            <p className="font-medium text-slate-300 mb-1">How it works:</p>
-            <ol className="list-decimal list-inside space-y-0.5">
-              <li>Sensor readings are logged with each prediction</li>
-              <li>Use ✓/✗ buttons to confirm or correct labels</li>
-              <li>Click "Retrain Model" to learn from your data</li>
-              <li>Model improves over time with more readings</li>
-            </ol>
-          </div>
         </div>
       </div>
 
-      {/* MQTT Log Panel */}
       <details className="rounded-2xl bg-slate-800/50 border border-slate-700 p-6">
         <summary className="text-lg font-semibold text-slate-200 cursor-pointer select-none">
           MQTT Logs ({logs.length})

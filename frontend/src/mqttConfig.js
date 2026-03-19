@@ -18,9 +18,9 @@ const PUBLIC_BROKER = {
 // !! CHANGE THE IP ADDRESS to your edge device's IP !!
 // Find edge IP with: ipconfig (Windows) or ifconfig (Mac/Linux)
 const LOCAL_BROKER = {
-  host: "192.168.1.100",  // ← CHANGE THIS to your edge device IP
+  host: "10.157.192.111",  // ← CHANGE THIS to your edge device IP
   port: 8000,
-  url: "ws://192.168.1.100:8000/mqtt"
+  url: "ws://10.157.192.111:8000/mqtt"
 }
 
 // ===== AUTO-SELECT BASED ON MODE =====
