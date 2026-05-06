@@ -43,7 +43,7 @@ _last_publish_time = 0  # Track last time we published a result
 _last_threshold_breach = None  # Track latest threshold breach for AI explanation
 
 # Threshold definitions (ISO 10816 & Industrial Standards)
-VIB_DANGER = 15.0
+VIB_DANGER = 19.0
 TEMP_DANGER = 60.0
 
 # ----- Hybrid LoRa/MQTT Statistics -----

@@ -28,8 +28,8 @@ const FAULT_WINDOW_SIZE = 10  // Track last 10 readings
 const FAULT_THRESHOLD_COUNT = 5  // Mark faulty if 5+ out of 10 are faulted
 
 // VMC Physics-Based Warning Thresholds (ISO 10816 & Industrial Standards)
-const VIB_WARN = 12  // ISO 10816 elevated vibration (pitting start)
-const VIB_DANGER = 15  // ISO 10816 critical pitting threshold
+const VIB_WARN = 17  // ISO 10816 elevated vibration (pitting start)
+const VIB_DANGER = 19  // ISO 10816 critical pitting threshold
 const TEMP_WARN = 50  // Industrial bearing warning temperature
 const TEMP_DANGER = 60  // Industrial thermal runout threshold
 
